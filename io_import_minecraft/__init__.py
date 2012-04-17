@@ -24,7 +24,7 @@ bl_info = {
     "name": "Import: Minecraft b1.7+",
     "description": "Importer for viewing Minecraft world/region data",
     "author": "Adam Crossan (acro)",
-    "version": (1,4),
+    "version": (1,5),
     "blender": (2, 6, 0),
     "api": 41226,
     "location": "File > Import > Minecraft",
@@ -56,7 +56,7 @@ from . import mineregion
 class MinecraftWorldSelector(bpy.types.Operator):
     """An operator defining a dialogue for choosing one on-disk Minecraft world to load.
 This supplants the need to call the file selector, since Minecraft worlds require
-a given folder structure and multiple files and cannot be selected singly."""
+a preset specific folder structure of multiple files which cannot be selected singly."""
 
     bl_idname = "mcraft.selectworld"
     bl_label = "Select Minecraft World"
@@ -68,8 +68,8 @@ a given folder structure and multiple files and cannot be selected singly."""
     mcLoadAtCursor = bpy.props.BoolProperty(name='Use 3D Cursor as Player', description='Loads as if 3D cursor offset in viewport was the player (load) position.', default=False)
 
     #TODO: Make this much more intuitive for the user!
-    mcLowLimit = bpy.props.IntProperty(name='Load Floor', description='The lowest depth layer to load. (High=128, Sea=64, Low=0)', min=0, max=128, step=1, default=0, subtype='UNSIGNED')
-    mcHighLimit = bpy.props.IntProperty(name='Load Ceiling', description='The highest layer to load. (High=128, Sea=64, Low=0)', min=0, max=128, step=1, default=128, subtype='UNSIGNED')
+    mcLowLimit = bpy.props.IntProperty(name='Load Floor', description='The lowest depth layer to load. (High=256, Sea=64, Low=0)', min=0, max=256, step=1, default=0, subtype='UNSIGNED')
+    mcHighLimit = bpy.props.IntProperty(name='Load Ceiling', description='The highest layer to load. (High=256, Sea=64, Low=0)', min=0, max=256, step=1, default=256, subtype='UNSIGNED')
 
     mcLoadRadius = bpy.props.IntProperty(name='Load Radius', description="""The half-width of the load range around load-pos.
 e.g, 4 will load 9x9 chunks around the load centre
@@ -104,12 +104,22 @@ WARNING! Above 10, this gets slow and eats LOTS of memory!""", min=1, max=50, st
     from . import mineregion
     wlist = mineregion.getWorldSelectList()
     if wlist is not None:
-        mcWorldSelectList = bpy.props.EnumProperty(items=wlist[::-1], name="World", description="Which Minecraft save should be loaded?")	#default='0', #, update=worldchange
+        revwlist = wlist[::-1]
+        #temp debug REMOVE!
+        ###dworld = None
+        ###wnamelist = [w[0] for w in revwlist]
+        ###if "AnviliaWorld" in wnamelist:
+        #####build the item for it to be default-selected...? Or work out if ENUM_FLAG is on?
+        ###    dworld = "%d" % wnamelist.index("AnviliaWorld") #set(["AnviliaWorld"])
+        ###if dworld is None:
+        mcWorldSelectList = bpy.props.EnumProperty(items=wlist[::-1], name="World", description="Which Minecraft save should be loaded?")	#default='0', update=worldchange
+        ###else:
+        ###    mcWorldSelectList = bpy.props.EnumProperty(items=wlist[::-1], name="World", description="Which Minecraft save should be loaded?", default=dworld)   #, options={'ENUM_FLAG'}
     else:
         mcWorldSelectList = bpy.props.EnumProperty(items=[], name="World", description="Which Minecraft save should be loaded?") #, update=worldchange
 
         #TODO: on select, check presence of DIM-1 etc.
-    print("wlist:: ", wlist)
+    #print("wlist:: ", wlist)
     netherWorlds = [w[0] for w in wlist if mineregion.hasNether(w[0])]
     #print("List of worlds with Nether: ", netherWorlds)
 
@@ -199,10 +209,10 @@ WARNING! Above 10, this gets slow and eats LOTS of memory!""", min=1, max=50, st
         col = layout.column()
 
 def worldchange(self, context):
-	##UPDATE (ie read then write back the value of) the property in the panel
-	#that needs to be updated. ensure it's in the scene so we can get it...
+    ##UPDATE (ie read then write back the value of) the property in the panel
+    #that needs to be updated. ensure it's in the scene so we can get it...
     #bpy.ops.mcraft.selectworld('INVOKE_DEFAULT')
-	#if the new world selected has nether, then update the nether field...
+    #if the new world selected has nether, then update the nether field...
     #in fact, maybe do that even if it doesn't.
     #context.scene['MCLoadNether'] = True
     return {'FINISHED'}

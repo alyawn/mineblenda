@@ -1,9 +1,8 @@
 import bpy
 from bpy.props import FloatVectorProperty
-from add_utils import AddObjectHelper, add_object_data
+###from add_utils import AddObjectHelper, add_object_data
 from mathutils import Vector
 
-#from . import minecraft_blocks
 from . import blockbuild	#import *?
 
 #gonna be using blockbuild.createMCBlock(mcname, diffuseColour, mcfaceindices) (bottom, top, right, front, left, back!)
@@ -12,17 +11,22 @@ from . import blockbuild	#import *?
 
 import sys, os, gzip
 import datetime
-from struct import calcsize, unpack, error as StructError
+#from struct import calcsize, unpack, error as StructError
 
 #tag classes: switch/override the read functions once they know what they are
 #and interpret payload by making more taggy bits as needed inside self.
 #maybe add mcpath as a context var so it can be accessed from operators.
 
+REPORTING = {}
+REPORTING['totalchunks'] = 0
 totalchunks = 0
-wseed = None	#store chosen world's worldseed here for handy referencing for slimechunk detemination.
+wseed = None	#store chosen world's worldseed here for handy referencing for slimechunk determination.
 
-#TODO: loading custom save locations rather than default saves folder. good for backup reading.
+#TODO: loading custom save locations rather than default saves folder. good for backup/server game reading.
 # what's a good way to swap out the world-choice dialogue for a custom path input??
+
+MCREGION_VERSION_ID = 0x4abc;	# Check the world's level.dat 'version' property for these.
+ANVIL_VERSION_ID = 0x4abd;		# 
 
 MCPATH = ''
 MCSAVEPATH = ''
@@ -36,7 +40,7 @@ else:
 MCSAVEPATH = os.path.join(MCPATH, 'saves/')
     
 #TODO: Retrieve these from bpy.props properties stuck in the scene RNA...
-EXCLUDED_BLOCKS = [1, 3]    #(1,3) # sort of hack to reduce loading / slowdown: (1- Stone, 3- Dirt). Other usual suspects are Grass,Water, Leaves, Sand,StaticLava
+EXCLUDED_BLOCKS = [1, 3]    #(1,3) # hack to reduce loading / slowdown: (1- Stone, 3- Dirt). Other usual suspects are Grass,Water, Leaves, Sand,StaticLava
 
 LOAD_AROUND_3D_CURSOR = False  #calculates 3D cursor as a Minecraft world position, and loads around that instead of player (or SMP world spawn) position
 
@@ -46,8 +50,10 @@ OPTIONS = {}
 
 #"Profile" execution time checks for measuring whether optimisations are worth it:
 
-blocksRead = 0
-blocksDropped = 0
+REPORTING['blocksread'] = 0
+#blocksRead = 0
+REPORTING['blocksdropped'] = 0
+#blocksDropped = 0
 t0 = datetime.datetime.now()
 tReadAndBuffered = -1
 tToMesh = -1
@@ -64,22 +70,9 @@ WORLD_ROOT = None
 #Feed directly into Blender, or save into the Blender temp dir, then import.
 print(MCPATH)
 
-# An NBT file contains one root TAG_Compound.
-# level.dat and region files have different formats.
+# level.dat and region files and anvil files have different formats, but all are NBT structured.
 
-TAG_END = 0
-TAG_BYTE = 1
-TAG_SHORT = 2
-TAG_INT = 3
-TAG_LONG = 4
-TAG_FLOAT = 5
-TAG_DOUBLE = 6
-TAG_BYTE_ARRAY = 7
-TAG_STRING = 8
-TAG_LIST = 9
-TAG_COMPOUND = 10
-
-INDENTCHAR = "  "
+from . import nbtreader	# import TagReader
 
 #Blockdata is: [name, diffusecolour RGB triple, (textureID_top, textureID_bottom, textureID_sides) triple or None if nonsquare, custommodel etc]
 # Texture IDs are the 1d (2d) count of location of their 16x16 square within terrain.png in minecraft.jar
@@ -89,7 +82,7 @@ INDENTCHAR = "  "
 
 BLOCKDATA = {0: ['Air'],
             1: ['Stone', (116,116,116), [1,1,1,1,1,1]],
-            2: ['Grass', (95,159,53), [2,0,3,3,3,3]],    #[bottom, top, right, front, left, back] - top is 0, for now. ofc grass is biome tinted, so... fooey!
+            2: ['Grass', (95,159,53), [2,0,3,3,3,3]],    #[bot, top, right, front, left, back] - top is 0; grass is biome tinted, though.
             3: ['Dirt', (150, 108, 74), [2,2,2,2,2,2]],
             4: ['Cobblestone', (94,94,94), [16,16,16,16,16,16]],
             5: ['WoodenPlank', (159,132,77), [4,4,4,4,4,4]],
@@ -111,7 +104,7 @@ BLOCKDATA = {0: ['Air'],
             21: ['LapisLazuliOre', (28,87,198), [160]*6],
             22: ['LapisLazuliBlock', (25,90,205), [144]*6],
             23: ['Dispenser', (42,42,42), [62,62,45,46,45,45]],
-            24: ['Sandstone', (215,209,153), [208,176,192,192,192,192]],
+            24: ['Sandstone', (215,209,153), [208,176,192,192,192,192], 'XD'],
             25: ['NoteBlock', (145,88,64), [74]*6],
             26: ['Bed'],    #inset, directional
             27: ['PwrRail', (204,93,22), [163]*6, 'XD', 'onehigh', None, {'transp': True}],	#meshtype-> "rail". define as 1/16thHeightBlock, read extra data to find orientation.
@@ -133,7 +126,7 @@ BLOCKDATA = {0: ['Air'],
             44: ['Slabs', (255,255,0), [6,6,5,5,5,5], 'XD', 'slab'],	#xd for type
             45: ['BrickBlock', (124,69,24), [7]*6],
             46: ['TNT', (219,68,26), [10,9,8,8,8,8]],
-            47: ['Bookshelf', (180,144,90), [35,4,4,4,4,4]],
+            47: ['Bookshelf', (180,144,90), [4,4,35,35,35,35]],
             48: ['MossStone', (61,138,61), [36]*6],
             49: ['Obsidian', (60,48,86), [37]*6],
             50: ['Torch', (240,150,50), [80,80,80,80,80,80], 'XD', 'inset', [0,6,7]],
@@ -184,7 +177,7 @@ BLOCKDATA = {0: ['Air'],
             95: ['LockedChest', (164,114,39), [25,25,26,27,26,26], 'xd', 'chest'], #texface order wrong (see #54)
             96: ['Trapdoor', (117,70,34), [84]*6, 'XD', 'inset', [0,13,0]],
             97: ['HiddenSfish', (116,116,116), [1]*6],
-            98: ['StoneBricks', (100,100,100), [54]*6],
+            98: ['StoneBricks', (100,100,100), [54]*6, 'XD'],
             99: ['HgBrwM', (210,177,125), [142]*6, 'XD'],	#XD for part/variant/colour (stalk/main)
             100: ['HgRedM', (210,177,125), [142]*6, 'XD'],
             101: ['IronBars', (171,171,173), [85]*6, 'XD', 'pane'],
@@ -208,27 +201,36 @@ BLOCKDATA = {0: ['Air'],
             119: ['EndPortal', (0,0,0), None],
             120: ['EndPortalFrame', (144,151,110), [175,158,159,159,159,159]],
             121: ['EndStone', (144,151,110), [175]*6],
-            122: ['DragonEgg', (0,0,0)]
+            122: ['DragonEgg', (0,0,0)],
+            123: ['RedstLampOff', (140,80,44), [211]*6],
+            124: ['RedstLampOn',  (247,201,138), [212]*6]
             }
     #Add in the rest!
     #Need to manually set textures and materials for each of these! damn!
 
 
-BLOCKVARIANTS = { 
+BLOCKVARIANTS = {
 
-#sapling: 6 -- spruce and birch types
+#sapling: 6 -- spruce, birch and jungle types
 
                   6:  [ [''],
                         ['Spruce', (57,90,57), [63]*6],
                         ['Birch', (207,227,186), [79]*6],
-                        ['']
+                        ['Jungle', (57,61,13), [30]*6]
                       ],
 
-                  17: [ [''],#normal wood
+                  17: [ [''],#normal wood (oak)
                         ['Spruce',(76,61,38), [21,21,116,116,116,116]],
                         ['Birch', (76,61,38), [21,21,117,117,117,117]],
+                        ['Jungle',(89,70,27), [21,21,153,153,153,153]],
                       ],
 #adjust leaf types, too!
+                    
+                  24: [ [''],#normal 'cracked' sandstone
+                        ['Decor', (215,209,153), [176,176,229,229,229,229]],
+                        ['Smooth',(215,209,153), [176,176,230,230,230,230]],
+                      ],
+
                   35: [ [''],
                         ['Orange', (255,150,54), [210]*6],	#custom tex coords!
                         ['Magenta', (227,74,240), [194]*6],
@@ -273,6 +275,13 @@ BLOCKVARIANTS = {
                         ['Nr'],
                         ['Up']
                       ],
+                      
+                  #stone brick moss/crack/circle variants:
+                  98: [ [''],
+                        ['Mossy',  (100,100,100), [100]*6],
+                        ['Cracked',(100,100,100), [101]*6],
+                        ['Circle', (100,100,100), [213]*6],
+                      ],
                   #hugebrownmush:
                   99: [ [''], #default (pores on all sides)
                         ['CrTWN',(210,177,125),[142,126,142,142,126,126]],#1
@@ -299,250 +308,20 @@ BLOCKVARIANTS = {
                         ['CrTES',(188,36,34),[142,125,125,125,142,142]],#9
                         ['Stem',(215,211,200),[142,142,141,141,141,141]]#10
                       ]
-  }
-
-#to read level.dat: compound, long, list short byte. int. ... end.
-
-#Why not just do this as a 10 element array of classes, and instantiate them as list[6](bstream) ?! MAGIC!
-# that's what the py NBT guy does already!
-# See struct - for handling types and bitpacking and converting to/from bytes. :D
-
-#pass classes around as objects. ie class Tag... we now have Tag in the namespace and can instantiate ones of it, right?
-
-# Note that ONLY Named Tags carry the name and tagType data. Explicitly identified Tags (such as TAG_String above) only contains the payload.
-
-# read binary, py 3.2 etc, you get a bytes object.
-# seek(pos-in-file), tell() (number of bytes read) and read(n) read n bytes...
-
-
-class TagReader:
-    #a class to generate tags based on ids.
-    
-    def readNamedTag(bstream):
-        """Reads a named Tag from the bytestream provided. Returns a tuple of (name, tag) (where tag object is the payload). Name will be empty for Tag_END. """
-        #print("RNT Starting")
-        tbyte = bstream.read(1)[0]    # read 1 byte and get its numerical value        #read 1 byte, switch type generated depending (stream-reader type 'abstract?' factory
-        #print("Byte read: %d" % tbyte)
-        tname = TAG_String(bstream).value
-        #print("Name read: %s" % tname)
-        #print("RNamedT - name is %s" %tname)
-        tpayload = TAGLIST[tbyte](bstream)
-        tpayload.name = tname
-        return (tname, tpayload)
-        #object type = bleh based on the number 0-255 you just read. Which should be a 10... for TAG_Compound.
-
-##DONT PASS THE TYPE IN TO EVERY INSTANCE WHEN ITS ALWAYS THE SAME! DEFINE IT AS A CLASS VAR IN THE SUBCLASSES.
-
-
-class Tag:
-    type = None
-
-    def __init__(self, bstream):
-        """Reads self-building data for this type from the bytestream given, until a complete tag instance is ready."""
-        # Tag itself doesn't do this. Must be overridden.
-        self.name = ""
-        ## named tags..? Are named tags only named when in a tag_compound that defines their names? And tag_compounds are always named?
-        #self.value = "" needed?
-        #payload... varies by subclass.
-        self._parseContent(bstream)
-
-    #Needed at all?!
-    def __readName(self, bstream):
-        """Only if called on a named tag .... will this be needed. may be Defined instead ... as a class method later"""
-        raise NotImplementedError(self.__class__.__name__)
-        pass
-
-    def _parseContent(self, bstream):
-        raise NotImplementedError(self.__class__.__name__)
-        pass    # raise notimplemented...?        # SUBCLASSES IMPLEMENT THIS!
-
-    #external code. not sure about these at all.
-    #Printing / bitformatting as tree
-    def toString(self):
-        return self.__class__.__name__ + ('("%s")'%self.name if self.name else "") + ": " + self.__repr__()    #huh... self.repr build tree
-
-    def printTree(self, indent=0):
-        return (INDENTCHAR*indent) + self.toString()
-
-
-#could just skip this class....?
-class TAG_End(Tag):
-    type = TAG_END
-
-    def _parseContent(self, bstream):
-        pass
-    #so, in fact... no need for this at all!?!
-
-
-class _TAG_Numeric(Tag):
-    """parses one of the numeric types (actual type defined by subclass)"""
-    #uses struct bitformats (within each subclass) to parse the value from the data stream...
-    bitformat = ""    #class, not instance, var.nB: make this something that will crash badly if not overwritten properly!
-
-    def __init__(self, bstream):
-        #if self.bitformat == "":
-        #    print("INCONCEIVABLE!")
-        #    raise NotImplementedError(self.__class__.__name__)
-        #print("fmt is: %s" % self.bitformat)
-        self.size = calcsize(self.bitformat)
-        super(_TAG_Numeric, self).__init__(bstream)
-
-    def _parseContent(self, bstream):
-        #struct parse it using bitformat.
-        self.value = unpack(self.bitformat, bstream.read(self.size))[0]
-
-    def __repr__(self):
-        return "%d" % self.value
-
-class TAG_Byte(_TAG_Numeric):
-    bitformat = ">b"    # class variable, NOT INSTANCE VARIABLE.
-    #easy, it's read 1 byte!
-    #def __parseContent(self, bstream):
-    #    self.value = bstream.read(1)[0]    #grab next 1 byte in stream. That's the TAG_Byte's payload.
-    #    #or rather, set bitformat to ">c"
-
-class TAG_Short(_TAG_Numeric):
-#    type = TAG_SHORT
-    bitformat = ">h"
-
-class TAG_Int(_TAG_Numeric):
-    bitformat = ">i"
-
-class TAG_Long(_TAG_Numeric):
-#    id = TAG_LONG
-    bitformat = ">q"
-
-class TAG_Float(_TAG_Numeric):
-#    id = TAG_FLOAT
-    bitformat = ">f"
-    
-    def __repr__(self):
-        return "%0.2f" % self.value
-
-class TAG_Double(_TAG_Numeric):
-#    id = TAG_DOUBLE
-    bitformat = ">d"
-    
-    def __repr__(self):
-        return "%0.2f" % self.value
-
-class TAG_Byte_Array(Tag):
-    type = TAG_BYTE_ARRAY
-    def _parseContent(self, bstream):
-        #read the length, then grab the bytes.
-        length = TAG_Int(bstream)
-        self.value = bstream.read(length.value)    #read n bytes from the file, where n is the numerical value of the length. Hope this works OK!
-
-    def __repr__(self):
-        return "[%d bytes array]" % len(self.value)
-        
-class TAG_String(Tag):
-    type = TAG_STRING
-    
-    def _parseContent(self, bstream):
-        #print ("Parsing TAG_String")
-        length = TAG_Short(bstream)
-        readbytes = bstream.read(length.value)
-        if len(readbytes) != length.value:
-            raise StructError()
-        self.value = readbytes.decode('utf-8')    #unicode(read, "utf-8")
-
-    def __repr__(self):
-        return self.value
-
-class TAG_List(Tag):
-    type = TAG_LIST
-
-    def _parseContent(self, bstream):
-        tagId = TAG_Byte(bstream).value
-        length = TAG_Int(bstream).value
-        self.value = []
-        for t in range(length):
-            self.value.append(TAGLIST[tagId](bstream))    #so that's just the tags, not the repeated type ids. makes sense.
-
-    def __repr__(self):    # use repr for outputting payload values, but printTree(indent) for outputting all. Perhaps.
-        if len(self.value) > 0:
-            return "%d items of type %s\r\n" % (len(self.value), self.value[0].__class__.__name__)    #"\r\n".join([k for k in self.value.keys()])    #to be redone!
-        else:
-            return "Empty List: No Items!"
-        #represent self as nothing (type and name already output in printtree by the super().printTree call. Take a new line, and the rest will be output as subelements...
-            
-    def printTree(self, indent):
-        outstr = super(TAG_List, self).printTree(indent)
-        for tag in self.value:
-            outstr += indent*INDENTCHAR + tag.printTree(indent+1) + "\r\n"
-        
-        return outstr
-    
-
-class TAG_Compound(Tag):
-    type = TAG_COMPOUND
-        #A sequential list of Named Tags. This array keeps going until a TAG_End is found.
-        #NB: "Named tags" are:
-        #byte tagType
-        #TAG_String name
-        #[payload]
-
-    # This is where things get named. ALl names must be unique within the tag-compound. So its value is a dict.
-    # it's named. so first thing is, read name.
-    # then, keep on reading until you get a Tag_END
-    #but, in-place create tags as you go and add them to an internal tag list..
-    #essentially this parses the PAYLOAD of a named TAG_Compound...
-    def _parseContent(self, bstream):
-        #tagnext = readNamedTag()
-    
-        self.value = {}
-        #print("Parsing TAG_Compound!")
-        readType = bstream.read(1)[0]    #rly?
-        #print("First compound inner tag type byte is: %d" % readType)
-        while readType != TAG_END:
-            tname = TAG_String(bstream).value
-            #print ("Tag name read as: %s" % tname)
-            payload = TAGLIST[readType](bstream)
-            payload.name = tname
-            self.value[tname] = payload
-            readType = bstream.read(1)[0]
-
-    def __repr__(self):    # use repr for outputting payload values, but printTree(indent) for outputting all. Perhaps.
-        return "\r\n"
-        #represent self as nothing (type and name already output in printtree by the super().printTree call. Take a new line, and the rest will be output as subelements...
-            
-    def printTree(self, indent):
-        outstr = super(TAG_Compound, self).printTree(indent)
-        keys = self.value.keys()
-        for k in keys:
-            outstr += indent*INDENTCHAR + self.value[k].printTree(indent+1) + "\r\n"
-        
-        return outstr
-
-
-TAGLIST = {TAG_BYTE: TAG_Byte, TAG_SHORT: TAG_Short, TAG_INT: TAG_Int, 
-    TAG_LONG:TAG_Long, TAG_FLOAT:TAG_Float, TAG_DOUBLE:TAG_Double, 
-    TAG_BYTE_ARRAY:TAG_Byte_Array, TAG_STRING:TAG_String,
-    TAG_LIST: TAG_List, TAG_COMPOUND:TAG_Compound}
+}
 
 
 def readLevelDat():
-    """Reads the level.dat for info like the world name, player inventory... etc."""
+    """Reads the level.dat for info like the world name, player inventory..."""
     lvlfile = gzip.open('level.dat', 'rb')
 
     #first byte must be a 10 (TAG_Compound) containing all else.
-
     #read a TAG_Compound...
     #rootTag = Tag(lvlfile)
 
-    rootTag = TagReader.readNamedTag(lvlfile)[1]    #don't care about the name... or do we? Argh, it's a named tag. Stick the name IN the tag after reading???
+    rootTag = nbtreader.TagReader.readNamedTag(lvlfile)[1]    #don't care about the name... or do we? Argh, it's a named tag. Stick the name IN the tag after reading?
 
     print(rootTag.printTree(0))    #give it repr with an indent param...?
-
-
-def readNBT(bstream):
-    rootname, rootTag = TagReader.readNamedTag(bstream)
-    rootTag.name = rootname
-
-    #check if not at end of string and read more NBT tags if present...?
-    #nfile.close()
-    return rootTag
 
 
 def readRegion(fname, vertexBuffer):
@@ -576,7 +355,7 @@ def readRegion(fname, vertexBuffer):
 
             #print(chunkdata.printTree(0))
             #quit()
-            chunklist.append((offset,chunksectorcount))        
+            chunklist.append((offset,chunksectorcount))
     #within the header, work out how many chunks are there... check timestamps... and then jump to chunk...
         cio += 4
 
@@ -590,265 +369,6 @@ def toChunkPos(pX,pZ):
     return (pX/16, pZ/16)
 
 
-def readChunkFromRegion(chunkPosX, chunkPosZ, vertexBuffer):
-    """Loads chunk located at the X,Z chunk location provided."""
-    from math import floor
-    global totalchunks, wseed
-
-    #region containing a given chunk is found thusly: floor of c over 32
-    regionX = floor(chunkPosX / 32)
-    regionZ = floor(chunkPosZ / 32)
-
-    rheaderoffset = ((chunkPosX % 32) + (chunkPosZ % 32) * 32) * 4
-
-    #print("Reading chunk %d,%d from region %d,%d" %(chunkPosX, chunkPosZ, regionX,regionZ))
-
-    rfileName = "r.%d.%d.mcr" % (regionX, regionZ)
-    if not os.path.exists(rfileName):
-        #Can't load this! It doesn't exist!
-        print("No such region generated.")
-        return
-
-    with open(rfileName, 'rb') as regfile:
-        # header for the chunk we want is at...
-        #The location in the region file of a chunk at (x, z) (in chunk coordinates) can be found at byte offset 4 * ((x mod 32) + (z mod 32) * 32) in its region file.
-        #Its timestamp can be found 4096 bytes later in the file
-        regfile.seek(rheaderoffset)
-        cheadr = regfile.read(4)
-        dataoffset = unpack(">i", b'\x00'+cheadr[0:3])[0]
-        chunksectorcount = cheadr[3]
-        
-        if dataoffset == 0 and chunksectorcount == 0:
-            pass
-            #print("Region exists, but chunk has never been created within it.")
-        else:
-            chunkdata = readChunk(regfile, dataoffset, chunksectorcount, vertexBuffer)
-            #print("Loaded chunk %d,%d" % (chunkPosX,chunkPosZ))
-
-            totalchunks += 1
-
-
-def readChunk(bstream, chunkOffset, chunkSectorCount, vtxBuffer):
-    #get the datastring out of the file...
-    import io, zlib
-
-    #cf = open(fname, 'rb')
-    initialPos = bstream.tell()
-
-    cstart = chunkOffset * 4096    #4 kiB
-    clen = chunkSectorCount * 4096
-    bstream.seek(cstart)    #this bstream is the region file
-
-    chunkHeaderAndData = bstream.read(clen)
-
-    #chunk header stuff is:
-    # 4 bytes: length (of remaining data)
-    # 1 byte : compression type (1 - gzip - unused; 2 - zlib: it should always be this in actual fact)
-    # then the rest, is length-1 bytes of compressed (zlib) NBT data.
-
-    chunkDLength = unpack(">i", chunkHeaderAndData[0:4])[0]
-    chunkDCompression = chunkHeaderAndData[4]
-    if chunkDCompression != 2:
-        print("Not a zlib-compressed chunk!?")
-        raise StringError()    #MinecraftSomethingError, perhaps.
-
-    chunkZippedBytes = chunkHeaderAndData[5:]
-
-    #could/should check that chunkZippedBytes is same length as chunkDLength-1.
-
-    #put the regionfile byte stream back to where it started:
-    bstream.seek(initialPos)
-
-    #Read the compressed chunk data
-    zipper = zlib.decompressobj()
-    chunkData = zipper.decompress(chunkZippedBytes)
-    chunkDataAsFile = io.BytesIO(chunkData)
-    chunkNBT = readNBT(chunkDataAsFile)
-
-    # Geometry creation! etc... If surface only, can get heights etc from lightarray.?
-
-    #top level tag in NBT is an unnamed TAG_Compound, for some reason, containing a named TAG_Compound "Level"
-    chunkLvl = chunkNBT.value['Level'].value
-    chunkXPos = chunkLvl['xPos'].value
-    chunkZPos = chunkLvl['zPos'].value
-    #print("Reading blocks for chunk: (%d, %d)\n" % (chunkXPos, chunkZPos))
-
-    readBlocks(chunkLvl, vtxBuffer)
-
-    return chunkNBT
-# kick-off reader code test skel:
-
-
-#Hollow volumes optimisation (version1: in-chunk only)
-def isExposedBlock(dX,dY,dZ, blockData, blockID, idAbove, skyHighLimit, depthLimit):
-    #fail-fast. checks if all ortho adjacent neighbours fall inside this chunk.
-    #EASY! Because it's 0-15 for both X and Z. For Y, we're iterating downward,
-    #so get the previous value (the block above) passed in.
-
-    if dX == 0 or dX == 15 or dY == 0 or dZ == 0 or dZ == 15 or blockID == 18:  #leaves
-        return True
-    
-    if idAbove != blockID:
-        return True
-    
-    if dY == skyHighLimit or dY == depthLimit:
-        return True
-    
-    #GLOBALS (see readBlocks, below)
-    CHUNKSIZE_X = 16    #static consts - global?
-    CHUNKSIZE_Y = 128
-    CHUNKSIZE_Z = 16
-    _Y_SHIFT = 7    # 2**7 is 128. use for fast multiply
-    _YZ_SHIFT = 11    #16 * 128 is 2048, which is 2**11
-    
-    #Check below:
-    ngbIndex = dY-1 + (dZ << _Y_SHIFT) + (dX << _YZ_SHIFT)    #Check this lookup in readBlocks, below! Can it go o.o.b.?
-    neighbour = blockData[ngbIndex]
-    if neighbour != blockID:
-        return True
-    
-    #Now checked above and below. Check all sides.
-    #Check -X
-    ngbIndex = dY + (dZ << _Y_SHIFT) + ((dX-1) << _YZ_SHIFT)    #Check this lookup in readBlocks, below! Can it go o.o.b.?
-    neighbour = blockData[ngbIndex]
-    if neighbour != blockID:
-        return True
-    
-    #Check +X
-    ngbIndex = dY + (dZ << _Y_SHIFT) + ((dX+1) << _YZ_SHIFT)    #Check this lookup in readBlocks, below! Can it go o.o.b.?
-    neighbour = blockData[ngbIndex]
-    if neighbour != blockID:
-        return True
-
-    #Check -Z
-    ngbIndex = dY + ((dZ-1) << _Y_SHIFT) + (dX << _YZ_SHIFT)    #Check this lookup in readBlocks, below! Can it go o.o.b.?
-    neighbour = blockData[ngbIndex]
-    if neighbour != blockID:
-        return True
-
-    #Check +Z
-    ngbIndex = dY + ((dZ+1) << _Y_SHIFT) + (dX << _YZ_SHIFT)    #Check this lookup in readBlocks, below! Can it go o.o.b.?
-    neighbour = blockData[ngbIndex]
-    if neighbour != blockID:
-        return True
-
-    return False
-
-#nb: 0 is bottom bedrock, 128 is top of sky. Sea is 64.
-def readBlocks(chunkLevelData, vertexBuffer):
-    """readBlocks(chunkLevelData) -> takes a named TAG_Compound 'Level' containing a chunk's blocks, data, heightmap, xpos,zpos, etc.
-Adds the data points into a 'vertexBuffer' which is a per-named-type dictionary of ????'s. That later is made into Blender geometry via from_pydata."""
-    #TODO: also TileEntities and Entities. Entities will generally be an empty list.
-    #TileEntities are needed for some things to define fully...
-
-    global unknownBlockIDs, blocksRead, blocksDropped
-    global OPTIONS
-    #skyHighLimit=128
-    #depthLimit=0
-    skyHighLimit = OPTIONS['highlimit']
-    depthLimit   = OPTIONS['lowlimit']
-
-    #chunkLocation = 'xPos' 'zPos' ...
-    chunkX = chunkLevelData['xPos'].value
-    chunkZ = chunkLevelData['zPos'].value
-
-    CHUNKSIZE_X = 16    #static consts - global?
-    CHUNKSIZE_Y = 128
-    CHUNKSIZE_Z = 16
-
-    _Y_SHIFT = 7    # 2**7 is 128. use for fast multiply
-    _YZ_SHIFT = 11    #16 * 128 is 2048, which is 2**11
-
-    # Blocks, Data, Skylight, ... heightmap
-    
-    #TODO: Check that this chunk has even been populated...
-    
-    #Blocks contain the block ids; Data contains the extra info: 4 bits of lighting info + 4 bits of 'extra fields'
-    # eg Lamp direction, crop wetness, etc.
-    # Heightmap gives us quick access to the top surface of everything - ie optimise out iterating through all sky blocks.
-    
-    #To access a specific block from either the block or data array from XYZ coordinates, use the following formula:
-    # Index = x + (y * Height + z) * Width 
-
-    #naive starting point: LOAD ALL THE BLOCKS! :D
-
-    blockData = chunkLevelData['Blocks'].value    #yields a TAG_Byte_Array value (bytes object)
-
-    heightMap = chunkLevelData['HeightMap'].value
-    
-    extraData = chunkLevelData['Data'].value
-    
-    #256 bytes of heightmap data. 16 x 16. Each byte records the lowest level
-    #in each column where the light from the sky is at full strength. Speeds up
-    #computing of the SkyLight. Note: This array's indexes are ordered Z,X 
-    #whereas the other array indexes are ordered X,Z,Y.
-
-    #loadedData -> we buffer everything into lists, then batch-create the
-    #vertices later. This makes model creation enormously (many many times) faster
-
-    #list of named, distinct material meshes. add vertices to each, only in batches.
-    #Optimisation: 'Hollow volumes': only add if there is at least 1 orthogonal non-same-type neighbour.
-
-    # dataX will be dX, blender X will be bX.
-    for dX in range(CHUNKSIZE_X):
-        #print("looping chunk x %d" % dX)
-        for dZ in range(CHUNKSIZE_Z):   #-1, -1, -1):
-            #get starting Y from heightmap, ignoring excess height iterations.
-            #heightByte = heightMap[dX + (dZ << 4)]    # z * 16
-            heightByte = 127    #Fix: always start from very top... for now.
-            #This makes nether load properly, plus missed objects in overworld
-            #omitted due to lighting calculations being wrong.
-            if heightByte > skyHighLimit:
-                heightByte = skyHighLimit
-            #gives the LOWEST LEVEL where light is max. Start at this value, and y-- until we hit bedrock at y == 0.
-            dY = heightByte
-            oneBlockAbove = 0   #data value of the block 1 up from where we are now. (for neighbour comparisons)
-            #for dY in range(CHUNKSIZE_Y): # naive method (iterate all)
-            while dY >= depthLimit:
-
-                blockIndex = dY + (dZ << _Y_SHIFT) + (dX << _YZ_SHIFT)  # max number of bytes in a chunk is 32768. this is coming in at 32839 for XYZ: (15,71,8)
-                blockID = blockData[ blockIndex ]
-
-                #except IndexError:
-                #    print("X:%d Y:%d Z %d, blockID from before: %d, cx,cz: %d,%d. Blockindex: %d" % (dX,dY,dZ,blockID,chunkX,chunkZ, blockIndex))
-                #    raise IndexError
-                
-                #create this block in the output!
-                if blockID != 0 and blockID not in EXCLUDED_BLOCKS:	# 0 is air
-                    blocksRead += 1
-
-                    #hollowness test:
-                    
-                    if blockID in BLOCKDATA:
-
-                        if isExposedBlock(dX,dY,dZ, blockData, blockID, oneBlockAbove, skyHighLimit, depthLimit):     #TODO: Make better version of this that counts across chunks and regions.
-
-                            #Load extra data (if applicable to blockID):
-                            #if it has extra data, grab 4 bits from extraData
-                            datOffset = (int(blockIndex /2))    #divided by 2
-                            datHiBits = blockIndex % 2 #odd or even, will be hi or low nibble
-                            extraDatByte = extraData[datOffset] # should be a byte of which we only want part.
-                            hiMask = 0b11110000
-                            loMask = 0b00001111
-                            extraValue = None
-                            if datHiBits:
-                                #get high 4, and shift right 4.
-                                extraValue = loMask & (extraDatByte >> 4)
-                            else:
-                                #mask hi 4 off.
-                                extraValue = extraDatByte & loMask
-                            #create block in corresponding blockmesh
-                            createBlock(blockID, (chunkX, chunkZ), (dX,dY,dZ), extraValue, vertexBuffer)
-                        else:
-                            blocksDropped += 1
-                    else:
-                        #print("Unrecognised Block ID: %d" % blockID)
-                        #createUnknownMeshBlock()
-                        unknownBlockIDs.add(blockID)
-                dY -= 1
-                oneBlockAbove = blockID   # set 'last read block' to current value
-
-
 #TODO Possible Key Options for the importer:
 #"Surface only": use the heightmap and only load surface.
 #Load more than just the top level, obviously, cos of cliff 
@@ -858,6 +378,15 @@ Adds the data points into a 'vertexBuffer' which is a per-named-type dictionary 
 
 #"Load horizon" / "load radius": how far away from the load point should 
 #the loading continue? Can't possibly load everything in big worlds.
+
+
+def batchBuild(meshBuffer):
+    #build all geom from pydata as meshes in one shot. :) This is fast.
+    for meshname in (meshBuffer.keys()):
+        me = bpy.data.meshes[meshname]
+        me.from_pydata(meshBuffer[meshname], [], [])
+        me.update()
+
 
 def mcToBlendCoord(chunkPos, blockPos):
     """Converts a minecraft chunk X,Z pair and a minecraft ordered X,Y,Z block location triple into a Blender coordinate vector Vx,Vy,Vz.
@@ -875,42 +404,13 @@ And remember: in Minecraft, Y points to the sky."""
     return Vector((vx,vy,vz))
 
 
-def createBlock(blockID, chunkPos, blockPos, extraBlockData, vertBuffer):
-    """adds a vertex to the blockmesh for blockID in the relevant location."""
-
-    #chunkpos is X,Z; blockpos is x,y,z for block.
-    mesh = getMCBlockType(blockID, extraBlockData)  #this could be inefficient. Perhaps create all the types at the start, then STOP MAKING THIS CHECK!
-    if mesh is None:
-        return
-
-    typeName = mesh.name
-    vertex = mcToBlendCoord(chunkPos, blockPos)
-
-    if typeName in vertBuffer:
-        vertBuffer[typeName].append(vertex)
-    else:
-        vertBuffer[typeName] = [vertex]
-
-    #xyz is local to the 'stone' mesh for example. but that's from 0 (world).
-    #regionfile can be found from chunkPos.
-    #Chunkpos is an X,Z pair.
-    #Blockpos is an X,Y,Z triple - within chunk.
-
-def batchBuild(meshBuffer):
-    #build all geom from pydata as meshes in one shot. :) This is fast.
-    for meshname in (meshBuffer.keys()):
-        me = bpy.data.meshes[meshname]
-        me.from_pydata(meshBuffer[meshname], [], [])
-        me.update()
-
-
 def getMCBlockType(blockID, extraBits):
-    """Gets reference to block mesh, or creates it if it doesn't exist.
+    """Gets reference to a block type mesh, or creates it if it doesn't exist.
 The mesh created depends on meshType from the global blockdata (whether it's torch or repeater, not a cube)
 These also have to be unique and differently named for directional versions of the same thing - eg track round a corner or up a slope.
 This also ensures material and name are set."""
     from . import blockbuild
-    global OPTIONS
+    global OPTIONS  #, BLOCKDATA (surely!?)
 
     bdat = BLOCKDATA[blockID]
 
@@ -968,7 +468,6 @@ This also ensures material and name are set."""
     corename = "".join([corename, nameVariant])
     meshname = "".join(["mc", corename])
 
-
     dupblock = blockbuild.construct(blockID, corename, colourtriple, mcfaceindices, extraBits, objectShape, shapeParams, cycParams)	#creates the mesh, no matter what.
     #nb: construct should QUICKLY determine the exact thing it needs to make, and then CHECK if it already exists.
 
@@ -982,9 +481,7 @@ This also ensures material and name are set."""
     landob = bpy.data.objects.new(landmeshname, landmesh)
     bpy.context.scene.objects.link(landob)
 
-    ## TODO: landob.parent = WORLD_EMPTY. And at top, make a World Empty that is a global in the script, an object named for the worldname...
-    global WORLD_ROOT	#will have been created by this point. Just parent
-    # the land to it. (It's messy, but this is a small-scope script)
+    global WORLD_ROOT	#will have been created by this point. Just parent the land to it. (a bit messy, but this is a small-scope script)
     landob.parent = WORLD_ROOT
 
     #dupBlockOb = blockbuild.createMCBlock(typename, colourtriple, mcfaceindices)	# (bottom, top, right, front, left, back!)
@@ -992,26 +489,19 @@ This also ensures material and name are set."""
     dupblock.parent = landob
     landob.dupli_type = "VERTS"
     return landmesh
-    #bname = "mcb%d" % BLOCKNAMES[blockID]   # eg mcbStone
-
-    #if landmesh in bpy.data.meshes:
-    #    return bpy.data.meshes[landmeshname]
-    #else:
-    #    landmesh
-    #    return createMinecraftType(blockID, corename, extraBits, )
 
 
 def slimeOn():
     """Creates the cloneable slime block (area marker) and a mesh to duplivert it."""
-    if "slimeChunks" in bpy.data.objects:
+    if 'slimeChunks' in bpy.data.objects:
         return
 
-    #Create cube! (give it silly eyes if possible, too!)
+    #Create cube! (maybe give it silly eyes...)
     #ensure 3d cursor at 0...
     
     bpy.ops.mesh.primitive_cube_add()
     slimeOb = bpy.context.object    #get ref to last created ob.
-    slimeOb.name = "slimeMarker"
+    slimeOb.name = 'slimeMarker'
     bpy.ops.transform.resize(value=(8, 8, 8))
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     #slimeMarkerMesh = slimeOb.data	# could use this to 
@@ -1040,15 +530,13 @@ def slimeOn():
     bpy.context.scene.objects.link(slimeChunkob)
     slimeOb.parent = slimeChunkob
     slimeChunkob.dupli_type = "VERTS"
+    global WORLD_ROOT
+    slimeChunkob.parent = WORLD_ROOT
 
 
 
 def batchSlimeChunks(slimes):
-    # essentially, this adds a vertex into the slime duplimesh
-    #append vertex...
-
-    #build all geom from pydata as meshes in one shot. :(
-
+    #build all slime marker instances to their dupli-geom from pydata as meshes in one shot. :(
     me = bpy.data.meshes["slimeChunks"]
     me.from_pydata(slimes, [], [])
     me.update()
@@ -1069,7 +557,7 @@ def getWorldSelectList():
                 wData = None
                 try:
                     with gzip.open(sf + '/level.dat', 'rb') as levelDat:
-                        wData = readNBT(levelDat)
+                        wData = nbtreader.readNBT(levelDat)
                         ##catch errors if level.dat wasn't a gzip...
                 except IOError:
                     print("Unknown problem with level.dat format for %s" % sf)
@@ -1102,7 +590,7 @@ def hasNether(worldFolder):
         worldList = os.listdir(MCSAVEPATH)
         if worldFolder in worldList:
             wp = os.path.join(MCSAVEPATH, worldFolder, 'DIM-1')
-            return os.path.exists(wp)   #and contains correct files... (can check regions not empty, etc)
+            return os.path.exists(wp)   #and contains correct files... (could also check regions aren't empty, etc)
     return False
 
 def hasEnd(worldFolder):
@@ -1116,18 +604,18 @@ def hasEnd(worldFolder):
         worldList = os.listdir(MCSAVEPATH)
         if worldFolder in worldList:
             wp = os.path.join(MCSAVEPATH, worldFolder, 'DIM1')
-            return os.path.exists(wp)   #and contains correct files... (can check regions not empty, etc)
+            return os.path.exists(wp)   #and contains correct files... (could also check regions aren't empty, etc)
     return False
 
 def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
-    global unknownBlockIDs, totalchunks, wseed
+    global unknownBlockIDs, wseed
     global EXCLUDED_BLOCKS
     global WORLD_ROOT
-    global OPTIONS
+    global OPTIONS, REPORTING
     OPTIONS = toggleOptions
 
     #timing/profiling:
-    global tChunkReadTimes, blocksRead, blocksDropped
+    global tChunkReadTimes
 
     if worldFolder == "":
         #world selected was blank. This can only happen if world select list was empty, ie no saves.
@@ -1155,44 +643,50 @@ def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
     # ...And generated Nether regions.
     if os.path.exists('DIM-1'):
         if OPTIONS['loadnether']:
-            print('nether LOAD!')   #this feature had better wait until hollow volumes are implemented... YAY! LOAD NETHER!
-            #os.chdir('DIM-1')
+            print('nether LOAD!')
         else:
-            print('Nether found')
+            print('Nether is present, but not chosen to load.')
     
     if os.path.exists('DIM1'):
         if OPTIONS['loadend']:
             print('load The End...')
         else:
-            print('The End found')
-    
+            print('The End is present, but not chosen to load.')
+
     #if the player didn't save out in those dimensions, we HAVE TO load at 3D cursor (or 0,0,0)
 
     worldData = None
     pSaveDim = None
+    worldFormat = 'mcregion'	#assume initially
 
     with gzip.open('level.dat', 'rb') as levelDat:
-        worldData = readNBT(levelDat)
-#        print(levelStats.printTree(0))
+        worldData = nbtreader.readNBT(levelDat)
+    #print(levelStats.printTree(0))
 
-        #Check if it's a multiplayer saved game (that's moved to saves dir)
-        #These don't have the Player tag.
-        if 'Player' in worldData.value['Data'].value:
-            #It's singleplayer
-            pPos = [posFloat.value for posFloat in worldData.value['Data'].value['Player'].value['Pos'].value ]     #in NBT, there's a lot of value...
-            pSaveDim = worldData.value['Data'].value['Player'].value['Dimension'].value
-        else:
-            #It's multiplayer.
-            #Get SpawnX, SpawnY, SpawnZ and centre around those. OR
-            # Check for another subfolder: 'players'. Read each NBT .dat in there, and create empties for all of them, but load around the first one.
-            spX = worldData.value['Data'].value['SpawnX'].value
-            spY = worldData.value['Data'].value['SpawnY'].value
-            spZ = worldData.value['Data'].value['SpawnZ'].value
-            pPos = [float(spX), float(spY), float(spZ)]
-            
-            #create empty markers for each player.
-            
-
+    #Check if it's a multiplayer saved game (which has been moved to saves dir)
+    #These don't have the Player tag.
+    if 'Player' in worldData.value['Data'].value:
+        #It's singleplayer
+        pPos = [posFloat.value for posFloat in worldData.value['Data'].value['Player'].value['Pos'].value ]     #in NBT, there's a lot of value...
+        pSaveDim = worldData.value['Data'].value['Player'].value['Dimension'].value
+    else:
+        #It's multiplayer.
+        #Get SpawnX, SpawnY, SpawnZ and centre around those. OR
+        #TODO: Check for another subfolder: 'players'. Read each NBT .dat in there, and create empties for all of them, but load around the first one.
+        spX = worldData.value['Data'].value['SpawnX'].value
+        spY = worldData.value['Data'].value['SpawnY'].value
+        spZ = worldData.value['Data'].value['SpawnZ'].value
+        pPos = [float(spX), float(spY), float(spZ)]
+        
+        #create empty markers for each player.
+    
+    if 'version' in worldData.value['Data'].value:
+        fmtVersion = worldData.value['Data'].value['version'].value	#19133 for Anvil. 19132 is McRegion.
+        if fmtVersion == MCREGION_VERSION_ID:
+            print("World is in McRegion format")
+        elif fmtVersion == ANVIL_VERSION_ID:
+            print("World is in Anvil format")
+            worldFormat = "anvil"
 
     wseed = worldData.value['Data'].value['RandomSeed'].value	#it's a Long
     print("World Seed : %d" % (wseed))	# or self.report....
@@ -1204,7 +698,7 @@ def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
     if (OPTIONS['loadnether'] and (pSaveDim is None or int(pSaveDim) != -1)) or OPTIONS['atcursor']:
         cursorPos = bpy.context.scene.cursor_location
         #that's an x,y,z vector (in Blender coords)
-        #convert to insane Minecraft coords!
+        #convert to insane Minecraft coords!        ##todo: test and check this still works in anvil??!
         # mcraft pos = -Y, Z, -X
         pPos = [ -cursorPos[1], cursorPos[2], -cursorPos[0]]
 
@@ -1217,7 +711,30 @@ def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
 
     meshBuffer = {}
 
-    regionfiles = os.listdir()
+    #Initialise the world root - an empty to parent all land objects to.
+    WORLD_ROOT = bpy.data.objects.new(worldSelected, None)	#EMPTY! By name of "worldSelected"
+    bpy.context.scene.objects.link(WORLD_ROOT)
+    WORLD_ROOT.empty_draw_size = 2.0
+    WORLD_ROOT.empty_draw_type = 'SPHERE'
+    
+    regionfiles = []
+    regionreader = None
+    if worldFormat == 'mcregion':
+        regionfiles = [f for f in os.listdir() if f.endswith('.mcr')]
+        from .mcregionreader import ChunkReader
+        regionreader = ChunkReader()  #just the class, not an instance...?
+        
+        #for r in regionfiles:
+        #    print("Reading: %s" % r)
+        #    totalchunks += readRegion(r)	#bad! We should read all chunks that might be present. Never mind 'regions'.
+    elif worldFormat == 'anvil':
+        regionfiles = [f for f in os.listdir() if f.endswith('.mca')]
+        from .mcanvilreader import AnvilChunkReader
+        regionreader = AnvilChunkReader()
+        #for r in regionfiles:
+        #    print("Reading: %s" % r)
+        #    totalchunks += readAnvilRegion(r, noisy=True)	#bad! We should read all chunks that might be present. Never mind 'regions'.
+    ####regionfiles = os.listdir() nope!
 
     #except when loading nether...
     playerChunk = toChunkPos(pPos[0], pPos[2])  # x, z
@@ -1225,15 +742,9 @@ def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
     print("Loading %d blocks around centre." % loadRadius)
     #loadRadius = 10 #Sane amount: 5 or 4. See also: 'load all' project... omit data below y-level 40. etc. other restriction options.
     #load stone...
-    
-    #Initialise the world root - an empty to parent all land objects to.
-    WORLD_ROOT = bpy.data.objects.new(worldSelected, None)	#EMPTY! By name of "worldSelected"
-    bpy.context.scene.objects.link(WORLD_ROOT)
-    WORLD_ROOT.empty_draw_size = 2.0
-    WORLD_ROOT.empty_draw_type = 'SPHERE'
 
     if not OPTIONS['atcursor']:	#loading at player
-        #Add an to show where the player is. (+CENTRE CAMERA ON!)
+        #Add an Empty to show where the player is. (+CENTRE CAMERA ON!)
         playerpos = bpy.data.objects.new('PlayerLoc', None)
         #set its coordinates...
         #convert Minecraft coordinate position of player into Blender coords:
@@ -1244,7 +755,7 @@ def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
         playerpos.parent = WORLD_ROOT
 
     #total chunk count across region files:
-    totalchunks = 0
+    REPORTING['totalchunks'] = 0
     
     pX = int(playerChunk[0])
     pZ = int(playerChunk[1])
@@ -1260,7 +771,7 @@ def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
         for x in range(pX-loadRadius, pX+loadRadius):
 
             tChunk0 = datetime.datetime.now()
-            readChunkFromRegion(x,z, meshBuffer)
+            regionreader.readChunk(x,z, meshBuffer) #may need to be further broken down to block level. maybe rename as loadChunk.
             tChunk1 = datetime.datetime.now()
             chunkTime = tChunk1 - tChunk0
             tChunkReadTimes.append(chunkTime.total_seconds())	#tString = "%.2f seconds" % chunkTime.total_seconds() it's a float.
@@ -1306,7 +817,6 @@ def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
     hideIfPresent('mcBedrock')
     hideIfPresent('mcRedstoneOre')
 
-    
     #Profile/run stats:
     chunkReadTotal = tChunkReadTimes[0]
     for tdiff in tChunkReadTimes[1:]:
@@ -1315,11 +825,11 @@ def readMinecraftWorld(worldFolder, loadRadius, toggleOptions):
     chunkMRT = chunkReadTotal / len(tChunkReadTimes)
     print("Mean chunk read time: %.2fs" % chunkMRT)
     
-    print("Block points processed: %d" % blocksRead)
-    print("of those, verts dumped: %d" % blocksDropped)
-    if blocksRead > 0:
-        print("Difference (expected vertex count): %d" % (blocksRead - blocksDropped))
-        print("Hollowing has made the scene %d%% lighter" % ((blocksDropped / blocksRead) * 100))
+    print("Block points processed: %d" % REPORTING['blocksread'])
+    print("of those, verts dumped: %d" % REPORTING['blocksdropped'])
+    if REPORTING['blocksread'] > 0:
+        print("Difference (expected vertex count): %d" % (REPORTING['blocksread'] - REPORTING['blocksdropped']))
+        print("Hollowing has made the scene %d%% lighter" % ((REPORTING['blocksdropped'] / REPORTING['blocksread']) * 100))
     
     
     #increase viewport clipping distance to see the world! (or maybe decrease mesh sizes)
